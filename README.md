@@ -16,7 +16,7 @@ ResRL adds a token-level signal for negative samples:
 4. 📏 Use the orthogonal residual distance as a token-level error score.
 5. ⚖️ Normalize residuals within the prompt group and use them to reweight negative advantages.
 
-Positive samples are still kept, but their advantages are down-scaled with a small constant. In the paper setting this value is `0.1`.
+Positive samples are still kept, but their advantages are down-scaled with a small constant. In the paper setting this value is `0.1`, consistent with the NSR/W-REINFORCE setting in [The Surprising Effectiveness of Negative Reinforcement in LLM Reasoning](https://github.com/TianHongZXY/RLVR-Decomposed).
 
 ![ResRL method overview](assets/figures/resrl_overview.png)
 
