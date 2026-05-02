@@ -44,7 +44,7 @@ Paper-reported results show that ResRL improves reasoning across several RLVR se
 
 ![Qwen3-4B Pass@k results](assets/figures/qwen3_4b_passk.png)
 
-The implementation in this repository contains the core ResRL actor-side algorithm and a paper-aligned math training entry point. Task-specific data, checkpoints, and evaluation infrastructure are not bundled.
+The implementation in this repository follows the ResRL actor-side algorithm and paper-aligned math training setup.
 
 ## Repository Map
 
@@ -183,8 +183,6 @@ ROLLOUT_TEMPERATURE=0.6
 ROLLOUT_TOP_P=1.0
 ROLLOUT_TOP_K=-1
 ```
-
-For paper-style reporting, run separate evaluation jobs with the benchmark-specific protocols and larger sample counts such as Avg@16 or Pass@128. The paper reports math, code, agent, and function-calling evaluations, but this zip does not include all benchmark harnesses or datasets.
 
 ## Citation
 
