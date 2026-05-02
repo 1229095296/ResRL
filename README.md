@@ -69,6 +69,8 @@ TRAIN_FILES=/data/dapo-math-17k.parquet
 VAL_FILES=/data/validation.parquet
 ```
 
+Training and test data preparation follows the public [FlowRL data pipeline](https://github.com/Xuekai-Zhu/FlowRL#step-2-data-preparation).
+
 The data should follow the usual `verl` GRPO/RLVR format:
 
 | Field | Purpose |
@@ -169,6 +171,8 @@ ROLLOUT_TEMPERATURE=0.6
 ROLLOUT_TOP_P=1.0
 ROLLOUT_TOP_K=-1
 ```
+
+Benchmark testing follows the public [FlowRL testing protocol](https://github.com/Xuekai-Zhu/FlowRL#testing).
 
 ## Citation
 
