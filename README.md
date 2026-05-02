@@ -50,7 +50,7 @@ The implementation in this repository follows the ResRL actor-side algorithm and
 
 ## Install
 
-Use a CUDA environment compatible with your PyTorch, FlashAttention, and vLLM stack. This repo follows the `verl` layout, so the standard editable install works:
+This codebase is built on [`verl-0.5.0`](https://github.com/volcengine/verl/tree/v0.5.0). Use a CUDA environment compatible with your PyTorch, FlashAttention, and vLLM stack, then install this repository in editable mode:
 
 ```bash
 conda create -n resrl python=3.10 -y
@@ -59,8 +59,6 @@ conda activate resrl
 pip install -e .
 pip install -r requirements.txt
 ```
-
-Install a compatible vLLM build for your cluster. The repo includes `docs/README_vllm0.8.md`, and `requirements.txt` documents `vllm==0.8.4` as the expected vLLM-era dependency.
 
 ## Data Format
 
