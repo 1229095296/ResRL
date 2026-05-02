@@ -186,13 +186,6 @@ ROLLOUT_TOP_K=-1
 
 For paper-style reporting, run separate evaluation jobs with the benchmark-specific protocols and larger sample counts such as Avg@16 or Pass@128. The paper reports math, code, agent, and function-calling evaluations, but this zip does not include all benchmark harnesses or datasets.
 
-## Implementation Notes
-
-- ResRL weighting is applied only to negative samples; positive samples use the constant `svd_pos_weight`.
-- Prompt grouping uses `uid` when present. Keeping all rollouts for a prompt together inside each PPO micro-batch is important for exact group-wise PCA.
-- `svd_mask_think_tokens` is off because the paper does not require masking thinking tags. If enabled for debugging, those tokens are left with neutral weight rather than a negative weight.
-- `train_command.sh` follows the math table settings. The paper text and appendix table differ slightly on whether code training uses a thinking template; this script keeps the math setting `enable_thinking=False`.
-
 ## Citation
 
 ```bibtex
