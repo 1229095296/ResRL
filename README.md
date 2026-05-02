@@ -20,17 +20,6 @@ Positive samples are still kept, but their advantages are down-scaled with a sma
 
 ![ResRL method overview](assets/figures/resrl_overview.png)
 
-## Figures
-
-The two main README figures are included under `assets/figures/`:
-
-| File | Source PDF | Purpose |
-| --- | --- | --- |
-| `assets/figures/resrl_overview.png` | `assets/figures/resrl_overview.pdf` | Method overview: positive subspace, negative projection, residual weighting. |
-| `assets/figures/qwen3_4b_passk.png` | `assets/figures/qwen3_4b_passk.pdf` | High-`k` pass-rate comparison for Qwen3-4B. |
-
-If you later add an ablation section, Figures 4, 8, and 10 are good appendix-style additions. They are less important for the first screen of the README.
-
 ## Paper Highlights
 
 Paper-reported results show that ResRL improves reasoning across several RLVR settings:
