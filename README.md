@@ -156,7 +156,6 @@ The core switches live under `actor_rollout_ref.actor`:
 | `svd_min_weight` | `0.1` | Lower bound for negative-token weights. |
 | `svd_pos_weight` | `0.1` | Positive-sample advantage multiplier. |
 | `svd_pca_niter` | `4` | Power iterations for `torch.pca_lowrank`. |
-| `svd_mask_think_tokens` | `false` | Optional debugging behavior; off for paper consistency. |
 
 The actor computes ResRL weights in `verl/workers/actor/dp_actor.py` from the model's penultimate hidden layer. It layer-normalizes hidden states, centers by the positive-token centroid, builds the low-rank basis with `torch.pca_lowrank`, and maps each valid negative token residual to a weight in `[svd_min_weight, 1.0]`.
 
