@@ -84,6 +84,39 @@ ppo_epochs: 1
 # Shuffle training data across PPO epochs
 shuffle: false
 
+# Number of rollouts sampled per prompt. ResRL uses it to recover prompt groups when uid is unavailable.
+rollout_n: ${oc.select:actor_rollout_ref.rollout.n,1}
+
+# Whether to enable ResRL negative-token projection residual weighting
+use_svd_token_weighting: false
+
+# Low-rank positive subspace dimension used by ResRL
+svd_rank: 64
+
+# Maximum number of positive response tokens sampled per prompt group for PCA
+svd_max_pos_tokens: 4096
+
+# Lower quantile for residual-distance normalization
+svd_q_low: 0.2
+
+# Upper quantile for residual-distance normalization
+svd_q_high: 0.8
+
+# Minimum token weight applied to negative samples
+svd_min_weight: 0.1
+
+# Constant multiplier applied to positive-sample advantages
+svd_pos_weight: 0.1
+
+# Power iterations used by torch.pca_lowrank
+svd_pca_niter: 4
+
+# Optional debugging switch to exclude think-tag tokens from ResRL weighting
+svd_mask_think_tokens: false
+
+# Whether to print per-group ResRL diagnostics
+svd_debug: false
+
 # checkpoint configs
 checkpoint:
 

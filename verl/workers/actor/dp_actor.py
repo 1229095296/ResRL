@@ -45,13 +45,28 @@ class DataParallelPPOActor(BasePPOActor):
 
         self.use_svd_token_weighting = self.config.get("use_svd_token_weighting", False)
         self.svd_rank = self.config.get("svd_rank", 64)
-        self.svd_max_pos_tokens = self.config.get("svd_max_pos_tokens", 8192)
+        self.svd_max_pos_tokens = self.config.get("svd_max_pos_tokens", 4096)
+        self.svd_q_low = self.config.get("svd_q_low", 0.2)
+        self.svd_q_high = self.config.get("svd_q_high", 0.8)
+        self.svd_min_weight = self.config.get("svd_min_weight", 0.1)
+        self.svd_pos_weight = self.config.get("svd_pos_weight", 0.1)
+        self.svd_pca_niter = self.config.get("svd_pca_niter", 4)
+        self.svd_mask_think_tokens = self.config.get("svd_mask_think_tokens", False)
+        self.svd_debug = self.config.get("svd_debug", False)
         self.rollout_n = self.config.get("rollout_n", 8)
 
         if torch.distributed.get_rank() == 0:
             print(f"Actor use_svd_token_weighting={self.use_svd_token_weighting}")
             if self.use_svd_token_weighting:
-                print(f"Actor svd_rank={self.svd_rank}, rollout_n={self.rollout_n}")
+                print(
+                    "Actor ResRL config: "
+                    f"svd_rank={self.svd_rank}, "
+                    f"svd_max_pos_tokens={self.svd_max_pos_tokens}, "
+                    f"svd_q=({self.svd_q_low}, {self.svd_q_high}), "
+                    f"svd_min_weight={self.svd_min_weight}, "
+                    f"svd_pos_weight={self.svd_pos_weight}, "
+                    f"rollout_n={self.rollout_n}"
+                )
 
         self.ulysses_sequence_parallel_size = self.config.ulysses_sequence_parallel_size
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
@@ -313,16 +328,20 @@ class DataParallelPPOActor(BasePPOActor):
         bsz, response_length, hidden_size = response_hidden.shape
         device = response_hidden.device
         eps = 1e-6
-        min_w = 0.1
-        q_low = float(getattr(self, "svd_q_low", 0.2))
-        q_high = float(getattr(self, "svd_q_high", 0.8))
-        max_pos_tokens = int(getattr(self, "svd_max_pos_tokens", 8192))
-        niter = int(getattr(self, "svd_pca_niter", 4))
+        min_w = float(self.svd_min_weight)
+        q_low = float(self.svd_q_low)
+        q_high = float(self.svd_q_high)
+        max_pos_tokens = int(self.svd_max_pos_tokens)
+        niter = int(self.svd_pca_niter)
+        use_think_mask = bool(self.svd_mask_think_tokens)
+        debug = bool(self.svd_debug)
 
         token_weights = torch.ones_like(response_mask, dtype=torch.float32, device=device)
+        response_mask_bool = response_mask > 0
+        is_positive_sample = is_positive_sample.to(device=device, dtype=torch.bool)
 
         think_mask = None
-        if input_ids is not None and response_length is not None:
+        if use_think_mask and input_ids is not None and response_length is not None:
             response_start_idx = input_ids.shape[1] - response_length - 1
             think_mask_full = self._create_think_only_mask(input_ids, response_start_idx)
             think_mask = think_mask_full[:, -response_length - 1: -1]
@@ -333,82 +352,71 @@ class DataParallelPPOActor(BasePPOActor):
         if prompt_ids is None:
             prompt_ids = torch.arange(bsz, device=device) // self.rollout_n
         else:
-            if not isinstance(prompt_ids, torch.Tensor):
-                prompt_ids = torch.tensor(prompt_ids, device=device)
+            if isinstance(prompt_ids, torch.Tensor):
+                prompt_ids = prompt_ids.to(device=device)
             else:
-                prompt_ids = prompt_ids.to(device)
+                prompt_ids_np = np.asarray(prompt_ids).reshape(-1)
+                if prompt_ids_np.shape[0] != bsz:
+                    raise ValueError(f"prompt_ids has length {prompt_ids_np.shape[0]}, expected {bsz}")
+                _, prompt_inverse = np.unique(prompt_ids_np.astype(str), return_inverse=True)
+                prompt_ids = torch.as_tensor(prompt_inverse, dtype=torch.long, device=device)
 
+        if prompt_ids.numel() != bsz:
+            raise ValueError(f"prompt_ids has length {prompt_ids.numel()}, expected {bsz}")
         unique_prompts = torch.unique(prompt_ids)
 
-        response_mask_bool = response_mask > 0
-
         for pid in unique_prompts:
+            pid_value = int(pid.item())
             group_mask = (prompt_ids == pid)
             pos_mask = group_mask & is_positive_sample
             neg_mask = group_mask & (~is_positive_sample)
-            num_pos = int(pos_mask.sum())
-            num_neg = int(neg_mask.sum())
-            print(f"[SVD] prompt_id={int(pid)}: {num_pos}个正样本, {num_neg}个负样本", end="")
-            
+
             if not pos_mask.any():
-                print(" NO positive samples")
                 continue
             if not neg_mask.any():
-                print(" NO negative samples")
                 continue
 
             pos_hidden = response_hidden[pos_mask]                 # (Bp, T, H)
             pos_m = response_mask_bool[pos_mask]                   # (Bp, T)
-            if pos_hidden.numel() == 0:
-                print(f"  [SVD] prompt_id={int(pid)}: NO pos_hidden")
-                continue
 
             if think_mask is not None:
-                think_mask_pos = think_mask[pos_mask]  # (Bp, T)
-                pos_m = pos_m & (~think_mask_pos)
+                pos_m = pos_m & (~think_mask[pos_mask])
 
-            num_total_tokens = pos_hidden.shape[0] * pos_hidden.shape[1]
-            num_valid_tokens = pos_m.sum().item()
             pos_hidden_valid = pos_hidden[pos_m]
-            
+
             if pos_hidden_valid.shape[0] < 4:
-                print(f"  [SVD] prompt_id={int(pid)}: NO valid positive samples ({pos_hidden_valid.shape[0]} < 4, total tokens={num_total_tokens}, valid tokens={num_valid_tokens})")
+                if debug and torch.distributed.get_rank() == 0:
+                    print(f"[ResRL] prompt_group={pid_value} skipped: only {pos_hidden_valid.shape[0]} valid positive tokens")
                 continue
-            
-            assert pos_hidden_valid.shape[0] == num_valid_tokens, \
-                f"mask error: pos_hidden_valid.shape[0]={pos_hidden_valid.shape[0]}, num_valid_tokens={num_valid_tokens}"
 
             M = pos_hidden_valid.shape[0]
             if M > max_pos_tokens:
-                indices = torch.linspace(0, M - 1, steps=max_pos_tokens, device=pos_hidden_valid.device).long()
+                indices = torch.randperm(M, device=pos_hidden_valid.device)[:max_pos_tokens]
                 pos_hidden_valid = pos_hidden_valid[indices]
+
             X = pos_hidden_valid.float()
-            
-            X_norm = torch.nn.functional.layer_norm(X, normalized_shape=(X.shape[-1],))  # (M, H)
+            X_norm = torch.nn.functional.layer_norm(X, normalized_shape=(X.shape[-1],))
 
             mu = X_norm.mean(dim=0, keepdim=True)                  # (1, H)
             Xc = X_norm - mu                                       # centered
 
             k = min(int(self.svd_rank), Xc.shape[0] - 1, Xc.shape[1])
             if k < 1:
-                print(f"  [SVD] prompt_id={int(pid)}: NO - k={k} < 1 (rank too small)")
+                if debug and torch.distributed.get_rank() == 0:
+                    print(f"[ResRL] prompt_group={pid_value} skipped: rank={k}")
                 continue
 
             try:
                 _, _, V = torch.pca_lowrank(Xc, q=k, niter=niter)
-                V_k = V  # (H, k)
-                print(f"  [SVD] prompt_id={int(pid)}: PCA success - rank={k}, positive samples={pos_hidden_valid.shape[0]}")
+                V_k = V[:, :k]  # (H, k)
             except Exception as e:
-                print(f"  [SVD] prompt_id={int(pid)}: PCA failed - {str(e)}")
+                if debug and torch.distributed.get_rank() == 0:
+                    print(f"[ResRL] prompt_group={pid_value} skipped: PCA failed - {str(e)}")
                 continue
 
             neg_indices = torch.where(neg_mask)[0]
             neg_hidden = response_hidden[neg_mask].float()         # (Bn, T, H)
             neg_m = response_mask_bool[neg_mask]                   # (Bn, T)
-
-            if neg_hidden.numel() == 0:
-                print(f"  [SVD] prompt_id={int(pid)}: NO - neg_hidden is empty")
-                continue
 
             neg_hidden_norm = torch.nn.functional.layer_norm(neg_hidden, normalized_shape=(neg_hidden.shape[-1],))  # (Bn, T, H)
 
@@ -416,137 +424,41 @@ class DataParallelPPOActor(BasePPOActor):
             proj = (Hc @ V_k) @ V_k.T                               # (Bn, T, H)
             resid = Hc - proj                                       # (Bn, T, H)
 
+            distances = (resid * resid).sum(dim=-1) / float(hidden_size)  # (Bn, T)
+            valid_neg_m = neg_m
             if think_mask is not None:
-                think_mask_neg = think_mask[neg_mask]  # (Bn, T)
-                non_think_valid_mask = neg_m & (~think_mask_neg)
-            
-                resid_non_think = resid[non_think_valid_mask]
-                distances_non_think = (resid_non_think * resid_non_think).sum(dim=-1) / float(hidden_size)
-                vd_non_think = distances_non_think  # (M,)
+                valid_neg_m = valid_neg_m & (~think_mask[neg_mask])
 
-                if vd_non_think.numel() == 0:
-                    print(f"  [SVD] prompt_id={int(pid)}: NO - non-think part has no valid token distance")
-                    continue
+            valid_distances = distances[valid_neg_m]
+            if valid_distances.numel() == 0:
+                if debug and torch.distributed.get_rank() == 0:
+                    print(f"[ResRL] prompt_group={pid_value} skipped: no valid negative tokens")
+                continue
 
-                print(f"  [SVD] prompt_id={int(pid)}: compute weights - {neg_hidden.shape[0]} negative samples, {vd_non_think.numel()} non-think tokens")
-                think_count = think_mask_neg.sum().item()
-                print(f"  [SVD] prompt_id={int(pid)}: {think_count} think tokens (weights set to -1, fully masked)")
+            lo = torch.quantile(valid_distances, q_low)
+            hi = torch.quantile(valid_distances, q_high)
+            range_val = (hi - lo).clamp_min(eps)
+            weights = torch.ones_like(distances, dtype=torch.float32, device=device)
+            if range_val < eps * 10:
+                weights[valid_neg_m] = (min_w + 1.0) / 2.0
             else:
-                distances = (resid * resid).sum(dim=-1) / float(hidden_size)  # (Bn, T)
-                vd = distances[neg_m]
-                if vd.numel() == 0:
-                    print(f"  [SVD] prompt_id={int(pid)}: NO - no valid token distance")
-                    continue
-                vd_non_think = vd
-                print(f"  [SVD] prompt_id={int(pid)}: compute weights - {neg_hidden.shape[0]} negative samples, {vd.numel()} valid tokens")
-
-            weights = torch.ones((neg_hidden.shape[0], neg_hidden.shape[1]), dtype=torch.float32, device=device)
-
-            if think_mask is not None:
-                if vd_non_think.numel() >= 32:
-                    lo = torch.quantile(vd_non_think, q_low)
-                    hi = torch.quantile(vd_non_think, q_high)
-                    range_val = (hi - lo).clamp_min(eps)
-
-                    if range_val < eps * 10:
-                        print(f"    all distances are almost the same (range={range_val.item():.6f}), non-think part uses fixed weight 0.55")
-                        weights[non_think_valid_mask] = (min_w + 1.0) / 2.0  # 0.55
-                    else:
-                        u = ((vd_non_think - lo) / range_val).clamp(0.0, 1.0)  # (M,)
-                        w_non_think = min_w + (1.0 - min_w) * u  # (M,)
-                        weights[non_think_valid_mask] = w_non_think
-
-                        num_zero_dist = (vd_non_think < 1e-6).sum().item()
-                        num_small_dist = ((vd_non_think >= 1e-6) & (vd_non_think < lo)).sum().item()
-                        num_mid_dist = ((vd_non_think >= lo) & (vd_non_think <= hi)).sum().item()
-                        num_large_dist = (vd_non_think > hi).sum().item()
-                        print(f"    non-think distance distribution: ~0({num_zero_dist}), <lo({num_small_dist}), [lo,hi]({num_mid_dist}), >hi({num_large_dist})")
-                else:
-                    lo = torch.quantile(vd_non_think, q_low)
-                    hi = torch.quantile(vd_non_think, q_high)
-                    range_val = (hi - lo).clamp_min(eps)
-
-                    u = ((vd_non_think - lo) / range_val).clamp(0.0, 1.0)  # (M,)
-                    w_non_think = min_w + (1.0 - min_w) * u  # (M,)
-                    weights[non_think_valid_mask] = w_non_think
-
-
-                print(f"    non-think part: compute weights based on SVD distance | think part: weights set to -1 (fully masked)")
-            else:
-                distances = (resid * resid).sum(dim=-1) / float(hidden_size)  # (Bn, T)
-                
-                if vd_non_think.numel() >= 32:
-                    lo = torch.quantile(vd_non_think, q_low)
-                    hi = torch.quantile(vd_non_think, q_high)
-                    range_val = (hi - lo).clamp_min(eps)
-
-                    if range_val < eps * 10:
-                        print(f"    all distances are almost the same (range={range_val.item():.6f}), non-think part uses fixed weight 0.55")
-                        weights = torch.full_like(distances, (min_w + 1.0) / 2.0)
-                    else:
-                        u = ((distances - lo) / range_val).clamp(0.0, 1.0)
-                        weights = min_w + (1.0 - min_w) * u
-
-                else:
-                    lo = torch.quantile(vd_non_think, q_low)
-                    hi = torch.quantile(vd_non_think, q_high)
-                    range_val = (hi - lo).clamp_min(eps)
-            
-                    u = ((distances - lo) / range_val).clamp(0.0, 1.0)
-                    weights = min_w + (1.0 - min_w) * u
-
+                normalized = ((distances - lo) / range_val).clamp(0.0, 1.0)
+                weights[valid_neg_m] = min_w + (1.0 - min_w) * normalized[valid_neg_m]
 
             weights = weights.clamp(min_w, 1.0)
-            
             neg_m_float = neg_m.to(weights.dtype)
             weights = weights * neg_m_float + (1.0 - neg_m_float) 
 
-            if think_mask is not None:
-                think_mask_neg = think_mask[neg_mask]  # (Bn, T)
-                weights[think_mask_neg] = -1.0 
-
-            for neg_idx_local, neg_idx_global in enumerate(neg_indices):
-                neg_idx_global_item = neg_idx_global.item()
-                sample_weights = weights[neg_idx_local].detach().cpu()  # (T,)
-                sample_think_mask = think_mask_neg[neg_idx_local].cpu() if think_mask is not None else None
-                valid_mask = neg_m[neg_idx_local].cpu()
-                
-                if think_mask is not None:
-                    think_valid_mask = valid_mask & sample_think_mask
-                    non_think_valid_mask = valid_mask & (~sample_think_mask)
-                    valid_weights_non_think = sample_weights[non_think_valid_mask]
-                    valid_weights_think = sample_weights[think_valid_mask]
-
-                    valid_weights_all = sample_weights[valid_mask]
-
-                    if valid_weights_non_think.numel() > 0:
-                        num_print = min(5, valid_weights_non_think.numel())
-                        print(f"    negative sample {neg_idx_global_item}: non-think weights [{valid_weights_non_think.min().item():.3f}, {valid_weights_non_think.max().item():.3f}], mean={valid_weights_non_think.mean().item():.3f}, number={valid_weights_non_think.numel()}", end="")
-                        if num_print > 0:
-                            print(f" | samples: ", end="")
-                            for i in range(num_print):
-                                print(f"w={valid_weights_non_think[i].item():.3f}", end="  ")
-                        print(f" | think weights number={valid_weights_think.numel()}")
-                    else:
-                        print(f"    negative sample {neg_idx_global_item}: [NOTE] no non-think tokens, all {valid_weights_all.numel()} tokens are think (weights fixed to -1.0)")
-                else:
-                    sample_distances = distances[neg_idx_local].detach().cpu()  # (T,)
-                    valid_weights = sample_weights[valid_mask]
-                    valid_distances = sample_distances[valid_mask]
-
-                    if valid_weights.numel() > 0:
-                        num_print = min(5, valid_weights.numel())
-                        print(f"    negative sample {neg_idx_global_item}: weights [{valid_weights.min().item():.3f}, {valid_weights.max().item():.3f}], mean={valid_weights.mean().item():.3f}", end=" | ")
-                        for i in range(num_print):
-                            print(f"dist={valid_distances[i].item():.6f}→w={valid_weights[i].item():.3f}", end="  ")
-                        print()
+            if debug and torch.distributed.get_rank() == 0:
+                valid_weights = weights[valid_neg_m]
+                print(
+                    f"[ResRL] prompt_group={pid_value} "
+                    f"pos_samples={int(pos_mask.sum())} neg_samples={int(neg_mask.sum())} "
+                    f"pos_tokens={pos_hidden_valid.shape[0]} neg_tokens={valid_distances.numel()} "
+                    f"rank={k} weight_mean={valid_weights.mean().item():.4f}"
+                )
 
             token_weights[neg_indices] = weights
-
-        if think_mask is not None:
-            for i in range(bsz):
-                if not is_positive_sample[i]:
-                    token_weights[i, think_mask[i]] = -1.0
 
         return token_weights
 
@@ -665,7 +577,7 @@ class DataParallelPPOActor(BasePPOActor):
                     seq_level_scores = (token_level_scores * response_mask).sum(dim=-1)
                     is_positive_sample = seq_level_scores > 0
                     
-                    if "uid" in micro_batch.non_tensor_batch:
+                    if self.svd_debug and "uid" in micro_batch.non_tensor_batch:
                         u, c = np.unique(micro_batch.non_tensor_batch["uid"], return_counts=True)
                         print("micro_batch size", len(micro_batch.non_tensor_batch["uid"]), "max uid count", c.max())
 
@@ -695,18 +607,19 @@ class DataParallelPPOActor(BasePPOActor):
                     
                     if bsz >= 1:
                         if self.use_svd_token_weighting:
+                            prompt_ids = micro_batch.non_tensor_batch.get("uid", None)
                             svd_token_weights = self._compute_svd_token_weights(
                                 response_hidden=response_hidden,
                                 response_mask=response_mask,
                                 is_positive_sample=is_positive_sample,
-                                prompt_ids=None,
+                                prompt_ids=prompt_ids,
                                 input_ids=model_inputs["input_ids"],
                                 response_length=model_inputs["responses"].size(-1),
                             )
 
                             for i in range(bsz):
                                 if is_positive_sample[i]:
-                                    weighted_advantages[i] = advantages[i] * 0.1
+                                    weighted_advantages[i] = advantages[i] * float(self.svd_pos_weight)
                                 else:
                                     weighted_advantages[i] = advantages[i] * svd_token_weights[i]
                         else:

@@ -52,19 +52,19 @@ class NaiveRewardManager:
         else:
             self.enable_length_penalty = enable_length_penalty  # Enable length-based reward penalty
 
-    import os
-
     def _apply_length_penalty(self, reward, response_length):
         """
         Apply length penalty to reward for positive samples.
 
         Rules:
-        - If response_length <= penalty_start (0.85 * max_length): reward * 1.0 (100%)
-        - If penalty_start < response_length <= max_length: 
+        - If response_length <= penalty_start: reward * 1.0 (100%)
+        - If penalty_start < response_length <= max_length:
             linear discount from 100% to 70%
         - If response_length > max_length: reward * 0.7 (70%)
 
-        max_length is read from environment variable MAX_RESPONSE_LENGTH (default: 4096).
+        Defaults follow the paper: no penalty up to 3500 tokens, then linearly decay to 0.7
+        at 4096 tokens. MAX_RESPONSE_LENGTH, LENGTH_PENALTY_START, and
+        LENGTH_PENALTY_END_SCALE can override these values.
 
         Args:
             reward: The original reward value
@@ -77,20 +77,20 @@ class NaiveRewardManager:
             # Only apply penalty to positive samples
             return reward
 
-        # Read max response length from environment variable
         max_length = int(os.getenv("MAX_RESPONSE_LENGTH", "4096"))
-        penalty_start = int(max_length * 0.85)
+        penalty_start = int(os.getenv("LENGTH_PENALTY_START", "3500"))
+        end_scale = float(os.getenv("LENGTH_PENALTY_END_SCALE", "0.7"))
 
         if response_length <= penalty_start:
             return reward
         elif response_length <= max_length:
-            # Linear discount from 100% to 70% between penalty_start and max_length
+            if max_length <= penalty_start:
+                return reward * end_scale
             discount_ratio = (response_length - penalty_start) / (max_length - penalty_start)
-            penalty_factor = 1.0 - 0.3 * discount_ratio  # 1.0 → 0.7
+            penalty_factor = 1.0 - (1.0 - end_scale) * discount_ratio
             return reward * penalty_factor
         else:
-            # Fixed 70% for responses longer than max_length
-            return reward * 0.7
+            return reward * end_scale
 
     def __call__(self, data: DataProto, return_dict=False):
         """We will expand this function gradually based on the available datasets"""
